@@ -5,7 +5,7 @@ import redis.asyncio as redis
 import hashlib
 from .strategies import FixedWindowStrategy, SlidingWindowStrategy, MovingWindowStrategy
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 __all__ = ["RateLimitMiddleware", "FixedWindowStrategy", "SlidingWindowStrategy", "MovingWindowStrategy"]
 
 STRATEGY_MAP = {"fixed": FixedWindowStrategy, "sliding": SlidingWindowStrategy, "moving": MovingWindowStrategy}
@@ -79,9 +79,11 @@ class RateLimitMiddleware:
         # Fallback to direct connection IP
         return scope["client"][0] if scope.get("client") else "unknown"
 
+    # Normalize and sort paths for exemption
     def _normalize_paths(self, paths: List[str]) -> List[Tuple[str, bool]]:
         return [(p[:-2].rstrip("/") if p.endswith("/*") else p.rstrip("/"), p.endswith("/*")) for p in paths]
 
+    # Normalize and sort rules
     def _normalize_rules(self, rules: Dict[str, Tuple[int, int, str]]) -> List[Dict]:
         normalized = []
         for path, (limit, period, strategy_name) in rules.items():
@@ -101,18 +103,21 @@ class RateLimitMiddleware:
         
         return sorted(normalized, key=lambda x: (not x["wildcard"], len(x["prefix"]) if x["wildcard"] else -len(x["prefix"])))
 
+    # Path matching helper
     def _matches(self, path: str, pattern: str, wildcard: bool) -> bool:
         return path.startswith(pattern) if wildcard else path == pattern
 
     def _hash(self, identifier: str) -> str:
         return hashlib.sha256(identifier.encode()).hexdigest()[:16]
 
+    # Check if identifier is currently banned
     async def _check_ban(self, identifier: str) -> Optional[int]:
         ban_key = f"ban:{self._hash(identifier)}"
         if await self.redis.get(ban_key):
             return await self.redis.ttl(ban_key)
         return None
 
+    # Record offense and apply ban if threshold exceeded
     async def _record_offense(self, identifier: str) -> Optional[int]:
         hashed = self._hash(identifier)
         offense_key = f"offense:{hashed}"
@@ -137,6 +142,7 @@ class RateLimitMiddleware:
             return int(ban_duration)
         return None
 
+    # Error response helper
     async def _error_response(self, scope: Scope, status: int, retry: int, msg: str, limit: int = 0, period: int = 0) -> Response:
         headers = {"Retry-After": str(retry)}
         
@@ -159,6 +165,7 @@ class RateLimitMiddleware:
         html = ERROR_PAGES[status].format(retry=retry) if status == 429 else ERROR_PAGES[403]
         return HTMLResponse(html, status_code=status, headers=headers)
 
+    # WebSocket close helper
     async def _websocket_close(self, send: Send, code: int, reason: str) -> None:
         """Send WebSocket close frame and disconnect."""
         await send({
@@ -207,13 +214,16 @@ class RateLimitMiddleware:
         redis_time = await self.redis.time()
         now = int(redis_time[0])
         
+        # Start checking each rule
         for rule in rules_to_apply:
             strategy = rule["strategy_cls"](self.redis)
             allowed, remaining, reset_ts = await strategy.hit(identifier, rule["limit"], rule["period"])
             
+            # If any rule is exceeded, block the request
             if not allowed:
                 reset_seconds = max(1, int(reset_ts - now))
                 
+                # Handle bans
                 if self.enable_bans:
                     ban_duration = await self._record_offense(identifier)
                     if ban_duration:
@@ -223,7 +233,8 @@ class RateLimitMiddleware:
                         response = await self._error_response(scope, 403, ban_duration, f"Banned for {ban_duration // 60} minutes")
                         await response(scope, receive, send)
                         return
-                
+                    
+                # Handle rate limit exceeded
                 if scope["type"] == "websocket":
                     await self._websocket_close(send, 1008, f"Rate limited: retry in {reset_seconds}s")
                     return
@@ -232,6 +243,7 @@ class RateLimitMiddleware:
                 await response(scope, receive, send)
                 return
             
+            # Track best remaining for headers
             if remaining < best_remaining:
                 best_remaining = remaining
                 reset_seconds = max(1, int(reset_ts - now))
@@ -256,11 +268,14 @@ class RateLimitMiddleware:
 
         # HTTP: pass through and add headers
         async def send_with_headers(message):
+            # Add rate limit headers to response start
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
+                # Add best rate limit headers
                 for k, v in best_headers.items():
                     headers.append((k.encode(), v.encode()))
                 message["headers"] = headers
             await send(message)
 
+        # Final call to app with modified send
         await self.app(scope, receive, send_with_headers)
