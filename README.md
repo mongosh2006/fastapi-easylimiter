@@ -15,20 +15,20 @@ An **ASGI async rate-limiting middleware** for FastAPI with **Redis**, designed 
 ## Features
 
 - Path based rules (`/api/*`, `/auth/*`, exact matches)
-- Fixed & sliding window algorithms (Lua)
+- Fixed, Sliding & Moving window algorithms (Lua)
 - `RateLimit`, `RateLimit-Policy`, `Retry-After` headers
 - Bans with back-off per IP with configurable window
-- BaseHTTPMiddleware for FastAPI/Starlette
-- Async Redis support
+- ASGI async middleware for FastAPI/Starlette
+- Asyncio Redis support
 - Easy to configure
 - No decorators needed
 - HTML/JSON error responses
+- XFF Header Support when enabled
 ---
 
 ## TODO
 
 - In-memory option
-- Additional strategies
 
 ## Installation
 
@@ -53,10 +53,10 @@ app.add_middleware(
     RateLimitMiddleware,
     redis=redis,
     rules={
-        "/*": (200, 60, "fixed"),           
-        "/api/*": (5, 1000, "sliding"),
+        "/*": (200, 60, "moving"),           
+        "/api/*": (10, 1, "sliding"),
         "/api/auth/*": (3, 1, "sliding"),
-        "/api/users/me": (2, 30, "fixed"),
+        "/api/users/me": (3, 30, "fixed"),
     },
     exempt=[],
     enable_bans=True,
@@ -64,6 +64,7 @@ app.add_middleware(
     ban_window="10m",
     ban_length="5m",
     ban_max_length="1d",
+    enable_xff=False,
     )
 ```
 
@@ -77,8 +78,8 @@ app.add_middleware(
 | ------------------------------------------| ----------------------------------------- | ----------- | --------------------------------------------- |
 | `rl:Fixe:{hash}:{limit}:{window}`         | `rl:Fixe:a1b2c3d4e5f6a7b8:100:60`         | String      | Fixed-window counter                          |
 | `rl:Slid:{hash}:{limit}:{window}`         | `rl:Slid:a1b2c3d4e5f6a7b8:60:60`          | ZSET        | Sliding window request log                    |
-| `offense:{identifier}`                    | `offense:203.0.113.5`                     | ZSET        | Offense tracking for ban escalation           |
-| `ban:{identifier}`                        | `ban:203.0.113.5`                         | String+TTL  | Active ban flag                               |
+| `offense:{hash}`                          | `offense:{a1b2c3d4e5f6a7b8}`                     | ZSET        | Offense tracking for ban escalation           |
+| `ban:{hash}`                              | `ban:{a1b2c3d4e5f6a7b8}`                         | String+TTL  | Active ban flag                               |
 
 ---
 
@@ -94,6 +95,7 @@ app.add_middleware(
 | `ban_window`     | `str`                             | No       | Time window for offense accumulation |
 | `ban_length`     | `str`                             | No       | Initial ban length                   |
 | `ban_max_length` | `str`                             | No       | Maximum exponential ban ceiling      |
+| `enable_xff`     | `bool`                            | No       | Enable X-Forwarded-For support       |
 
 ---
 
@@ -108,9 +110,4 @@ app.add_middleware(
 
 Contributions and forks are always welcome! Adapt, improve, or extend for your own needs.
 
-
-## Support
-
 [![Buy Me a Coffee](https://cdn.ko-fi.com/cdn/kofi3.png?v=3)](https://ko-fi.com/cfunkz81112)
-
----

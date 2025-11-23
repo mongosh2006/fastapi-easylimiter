@@ -1,187 +1,39 @@
 from typing import Dict, Tuple, Optional, List
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
-from starlette.types import ASGIApp
+from starlette.types import ASGIApp, Scope, Receive, Send
 import redis.asyncio as redis
-import time
 import hashlib
+from strategies import FixedWindowStrategy, SlidingWindowStrategy, MovingWindowStrategy
 
-__version__ = "0.4.1"
-__all__ = [
-    "RateLimitMiddleware",
-    "FixedWindowStrategy",
-    "SlidingWindowStrategy",
-]
+__version__ = "0.4.2"
+__all__ = ["RateLimitMiddleware", "FixedWindowStrategy", "SlidingWindowStrategy", "MovingWindowStrategy"]
 
-
-class BaseRedisStrategy:
-    """Base class for Redis-backed rate limiting strategies."""
-
-    def __init__(self, redis_client: redis.Redis):
-        self.redis = redis_client
-
-    def _key(self, identifier: str, limit: int, window: int) -> str:
-        """Generate Redis key for identifier with limit/window params."""
-        hashed = hashlib.sha256(identifier.encode()).hexdigest()[:16]
-        strategy = self.__class__.__name__[:4]
-        return f"rl:{strategy}:{hashed}:{limit}:{window}"
-
-
-class FixedWindowStrategy(BaseRedisStrategy):
-    """
-    Fixed-window rate limiting: resets counter at fixed time boundaries.
-    Simple but can allow bursts at boundaries (up to 2x limit).
-    """
-
-    LUA_SCRIPT = """
-    local key = KEYS[1]
-    local limit = tonumber(ARGV[1])
-    local window = tonumber(ARGV[2])
-    local now = tonumber(ARGV[3])
-    
-    local window_start = now - (now % window)
-    local window_end = window_start + window
-    local count = tonumber(redis.call('GET', key) or '0')
-    
-    if count < limit then
-        count = redis.call('INCR', key)
-        redis.call('EXPIREAT', key, window_end)
-        return {1, count, limit - count, window_end}
-    else
-        return {0, count, 0, window_end}
-    end
-    """
-
-    def __init__(self, redis_client: redis.Redis):
-        super().__init__(redis_client)
-        self.lua_script = self.redis.register_script(self.LUA_SCRIPT)
-
-    async def hit(self, identifier: str, limit: int, window: int) -> Tuple[bool, int]:
-        """Check and increment counter. Returns (allowed, reset_timestamp)."""
-        key = self._key(identifier, limit, window)
-        result = await self.lua_script(keys=[key], args=[limit, window, int(time.time())])
-        return result[0] == 1, int(result[3])
-
-    async def get_stats(self, identifier: str, limit: int, window: int) -> Tuple[int, int, int]:
-        """Return (count, remaining, reset_timestamp)."""
-        key = self._key(identifier, limit, window)
-        now = int(time.time())
-        window_start = now - (now % window)
-        window_end = window_start + window
-        
-        count = int(await self.redis.get(key) or 0)
-        remaining = max(0, limit - count)
-        return count, remaining, window_end
-
-
-class SlidingWindowStrategy(BaseRedisStrategy):
-    """
-    Sliding window log: tracks timestamp of each request.
-    Most accurate but more memory intensive. Prevents boundary bursts.
-    """
-
-    LUA_SCRIPT = """
-    local key = KEYS[1]
-    local limit = tonumber(ARGV[1])
-    local window = tonumber(ARGV[2])
-    local now = tonumber(ARGV[3])
-    local cutoff = now - window
-    
-    redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
-    local count = redis.call('ZCARD', key)
-    
-    if count < limit then
-        redis.call('ZADD', key, now, now)
-        redis.call('EXPIRE', key, window + 10)
-        
-        local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
-        local reset_time = now + window
-        if oldest and oldest[2] then
-            reset_time = tonumber(oldest[2]) + window
-        end
-        
-        return {1, count + 1, limit - (count + 1), math.floor(reset_time)}
-    else
-        local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
-        local reset_time = now + window
-        if oldest and oldest[2] then
-            reset_time = tonumber(oldest[2]) + window
-        end
-        
-        return {0, count, 0, math.floor(reset_time)}
-    end
-    """
-
-    def __init__(self, redis_client: redis.Redis):
-        super().__init__(redis_client)
-        self.lua_script = self.redis.register_script(self.LUA_SCRIPT)
-
-    async def hit(self, identifier: str, limit: int, window: int) -> Tuple[bool, int]:
-        """Check and add request. Returns (allowed, reset_timestamp)."""
-        key = self._key(identifier, limit, window)
-        result = await self.lua_script(keys=[key], args=[limit, window, time.time()])
-        return result[0] == 1, int(result[3])
-
-    async def get_stats(self, identifier: str, limit: int, window: int) -> Tuple[int, int, int]:
-        """Return (count, remaining, reset_timestamp)."""
-        key = self._key(identifier, limit, window)
-        now = time.time()
-        cutoff = now - window
-
-        pipe = self.redis.pipeline(transaction=True)
-        pipe.zremrangebyscore(key, "-inf", cutoff)
-        pipe.zcard(key)
-        pipe.zrange(key, 0, 0, withscores=True)
-        _, count, oldest_list = await pipe.execute()
-
-        oldest = oldest_list[0][1] if oldest_list else now
-        remaining = max(0, limit - count)
-        reset = int(oldest + window)
-        return count, remaining, reset
-
-
-STRATEGY_MAP = {
-    "fixed": FixedWindowStrategy,
-    "sliding": SlidingWindowStrategy,
-}
-
+STRATEGY_MAP = {"fixed": FixedWindowStrategy, "sliding": SlidingWindowStrategy, "moving": MovingWindowStrategy}
 
 def parse_duration(s: str) -> int:
-    """Parse duration string to seconds (e.g., '5m' -> 300, '1h' -> 3600)."""
+    """Parse duration string to seconds (e.g., '5m' -> 300)."""
     if not s:
         return 0
     s = s.strip().lower()
     num = int(''.join(filter(str.isdigit, s)) or "1")
-    if "d" in s:
-        return num * 86400
-    if "h" in s:
-        return num * 3600
-    if "m" in s:
-        return num * 60
-    return num
+    return num * (86400 if "d" in s else 3600 if "h" in s else 60 if "m" in s else 1)
 
 
-BAN_PAGE = (
-    '<body style="margin:0;height:100vh;display:grid;place-items:center;background:#0d1117;color:#c9d1d9;font:16px system-ui,sans-serif">'
-    '<div style="width:500px;padding:32px;background:#161b22;border-radius:12px;text-align:center;border:2px solid #30363d">'
-    '<h1 style="color:#f85149;margin:0 0 16px;font-size:32px">403 Blocked</h1>'
-    '<p style="margin:12px 0">Too many requests from your IP.</p>'
-    '<p style="color:#8b949e">Temporarily blocked due to abuse.</p>'
-    '</div></body>'
-)
-
-RATE_PAGE = (
-    '<body style="margin:0;height:100vh;display:grid;place-items:center;background:#0d1117;color:#c9d1d9;font:16px system-ui,sans-serif">'
-    '<div style="width:500px;padding:32px;background:#161b22;border-radius:12px;text-align:center;border:2px solid #30363d">'
-    '<h1 style="color:#f85149;margin:0 0 16px;font-size:32px">429 Too Many Requests</h1>'
-    '<p style="margin:12px 0">Rate limit exceeded.</p>'
-    '<p style="color:#8b949e">Retry in <strong>{retry}</strong>s</p>'
-    '</div></body>'
-)
+ERROR_PAGES = {
+    429: '<body style="margin:0;height:100vh;display:grid;place-items:center;background:#0d1117;color:#c9d1d9;font:16px system-ui,sans-serif">'
+         '<div style="width:500px;padding:32px;background:#161b22;border-radius:12px;text-align:center;border:2px solid #30363d">'
+         '<h1 style="color:#f85149;margin:0 0 16px;font-size:32px">429 Too Many Requests</h1>'
+         '<p style="margin:12px 0">Rate limit exceeded.</p>'
+         '<p style="color:#8b949e">Retry in <strong>{retry}</strong>s</p></div></body>',
+    403: '<body style="margin:0;height:100vh;display:grid;place-items:center;background:#0d1117;color:#c9d1d9;font:16px system-ui,sans-serif">'
+         '<div style="width:500px;padding:32px;background:#161b22;border-radius:12px;text-align:center;border:2px solid#30363d">'
+         '<h1 style="color:#f85149;margin:0 0 16px;font-size:32px">403 Blocked</h1>'
+         '<p style="margin:12px 0">Too many requests from your IP.</p>'
+         '<p style="color:#8b949e">Temporarily blocked due to abuse.</p></div></body>'
+}
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
+class RateLimitMiddleware:
     def __init__(
         self,
         app: ASGIApp,
@@ -193,39 +45,49 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         ban_window: str = "10m",
         ban_length: str = "5m",
         ban_max_length: str = "1d",
+        trust_xff: bool = False,
     ):
-        super().__init__(app)
+        self.app = app
         self.redis = redis
         self.rules = self._normalize_rules(rules)
         self.exempt = self._normalize_paths(exempt or [])
         self.enable_bans = enable_bans
-        self.ban_after_offenses = ban_offenses
-        self.ban_window_sec = parse_duration(ban_window)
-        self.initial_ban_sec = parse_duration(ban_length)
-        self.max_ban_sec = parse_duration(ban_max_length)
+        self.ban_after = ban_offenses
+        self.ban_window = parse_duration(ban_window)
+        self.initial_ban = parse_duration(ban_length)
+        self.max_ban = parse_duration(ban_max_length)
+        self.trust_xff = trust_xff
 
-    def _hash_identifier(self, identifier: str) -> str:
-        """Hash identifier for consistent Redis keys."""
-        return hashlib.sha256(identifier.encode()).hexdigest()[:16]
+    def _get_identifier(self, scope: Scope) -> str:
+        """
+        Extract client identifier for rate limiting.
+        
+        If trust_xff=True, uses X-Forwarded-For header (first IP in chain).
+        WARNING: Only enable trust_xff behind a trusted reverse proxy that
+        properly sets/strips X-Forwarded-For headers. Untrusted XFF allows
+        trivial rate limit bypass via header spoofing.
+        """
+        if self.trust_xff:
+            headers_dict = dict(scope.get("headers", []))
+            xff = headers_dict.get(b"x-forwarded-for", b"").decode().strip()
+            if xff:
+                # Take first IP in chain (client IP before any proxies)
+                client_ip = xff.split(",")[0].strip()
+                if client_ip:
+                    return client_ip
+        
+        # Fallback to direct connection IP
+        return scope["client"][0] if scope.get("client") else "unknown"
 
-    def _normalize_paths(self, paths: List[str]) -> List[Dict]:
-        """Normalize paths for matching (handles wildcards)."""
-        normalized = []
-        for path in paths:
-            wildcard = path.endswith("/*")
-            prefix = path[:-2].rstrip("/") if wildcard else path.rstrip("/")
-            normalized.append({"prefix": prefix, "wildcard": wildcard})
-        return normalized
+    def _normalize_paths(self, paths: List[str]) -> List[Tuple[str, bool]]:
+        return [(p[:-2].rstrip("/") if p.endswith("/*") else p.rstrip("/"), p.endswith("/*")) for p in paths]
 
     def _normalize_rules(self, rules: Dict[str, Tuple[int, int, str]]) -> List[Dict]:
-        """Normalize and sort rules for hierarchical matching."""
         normalized = []
-        
         for path, (limit, period, strategy_name) in rules.items():
             if strategy_name.lower() not in STRATEGY_MAP:
                 raise ValueError(f"Unknown strategy: {strategy_name}")
             
-            strategy_cls = STRATEGY_MAP[strategy_name.lower()]
             wildcard = path.endswith("/*")
             prefix = path[:-2].rstrip("/") if wildcard else path.rstrip("/")
             
@@ -234,169 +96,171 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 "wildcard": wildcard,
                 "limit": int(limit),
                 "period": int(period),
-                "strategy_cls": strategy_cls,
+                "strategy_cls": STRATEGY_MAP[strategy_name.lower()],
             })
         
-        # Sort: wildcards first (shortest first), then exact matches (longest first)
-        return sorted(
-            normalized,
-            key=lambda x: (not x["wildcard"], len(x["prefix"]) if x["wildcard"] else -len(x["prefix"]))
-        )
+        return sorted(normalized, key=lambda x: (not x["wildcard"], len(x["prefix"]) if x["wildcard"] else -len(x["prefix"])))
 
-    def _get_identifier(self, request: Request) -> str:
-        """Get client identifier for rate limiting."""
-        return request.client.host if request.client else "unknown"
+    def _matches(self, path: str, pattern: str, wildcard: bool) -> bool:
+        return path.startswith(pattern) if wildcard else path == pattern
 
-    def _is_exempt(self, path: str) -> bool:
-        """Check if path is exempt from rate limiting."""
-        path = path.rstrip("/")
-        for exempt in self.exempt:
-            if exempt["wildcard"]:
-                if path.startswith(exempt["prefix"]):
-                    return True
-            elif path == exempt["prefix"]:
-                return True
-        return False
-
-    def _get_matching_rules(self, path: str) -> List[Dict]:
-        """Get all rules matching this path in hierarchical order."""
-        path = path.rstrip("/")
-        matches = []
-        for rule in self.rules:
-            if rule["wildcard"]:
-                if path.startswith(rule["prefix"]):
-                    matches.append(rule)
-            elif path == rule["prefix"]:
-                matches.append(rule)
-        return matches
-
-    def _is_json_requested(self, request: Request) -> bool:
-        """Check if client expects JSON response."""
-        accept = request.headers.get("accept", "")
-        ua = request.headers.get("user-agent", "").lower()
-        return ("application/json" in accept or "text/json" in accept or
-                any(x in ua for x in ["curl", "wget", "postman", "insomnia", "httpie", "python-requests"]))
-
-    def _error_response(
-        self, 
-        request: Request, 
-        status_code: int, 
-        retry_after: int,
-        message: str, 
-        limit: int = 0, 
-        period: int = 0
-    ) -> Response:
-        """Generate error response (HTML or JSON based on request)."""
-        headers = {"Retry-After": str(retry_after)}
-
-        if status_code == 429:
-            headers.update({
-                "RateLimit-Policy": f"{limit};w={period}",
-                "RateLimit": f"limit={limit}, remaining=0, reset={retry_after}",
-            })
-
-        if self._is_json_requested(request):
-            data = {
-                "error": "rate_limit_exceeded" if status_code == 429 else "forbidden",
-                "detail": message,
-                "retry_after": retry_after
-            }
-            return JSONResponse(data, status_code=status_code, headers=headers)
-
-        html = RATE_PAGE.format(retry=retry_after) if status_code == 429 else BAN_PAGE
-        return HTMLResponse(html, status_code=status_code, headers=headers)
+    def _hash(self, identifier: str) -> str:
+        return hashlib.sha256(identifier.encode()).hexdigest()[:16]
 
     async def _check_ban(self, identifier: str) -> Optional[int]:
-        """Check if identifier is banned. Returns TTL if banned, None otherwise."""
-        hashed = self._hash_identifier(identifier)
-        ban_key = f"ban:{hashed}"
+        ban_key = f"ban:{self._hash(identifier)}"
         if await self.redis.get(ban_key):
             return await self.redis.ttl(ban_key)
         return None
 
     async def _record_offense(self, identifier: str) -> Optional[int]:
-        """Record rate limit offense. Returns ban duration if threshold exceeded, None otherwise."""
-        hashed = self._hash_identifier(identifier)
+        hashed = self._hash(identifier)
         offense_key = f"offense:{hashed}"
-        now = int(time.time())
         
-        await self.redis.zadd(offense_key, {str(now): now})
-        await self.redis.zremrangebyscore(offense_key, 0, now - self.ban_window_sec)
-        await self.redis.expire(offense_key, self.ban_window_sec + 60)
+        # Get current Redis time for consistency
+        redis_time = await self.redis.time()
+        now = int(redis_time[0])
         
-        offense_count = await self.redis.zcard(offense_key)
+        pipe = self.redis.pipeline(transaction=False)
+        pipe.zadd(offense_key, {str(now): now})
+        pipe.zremrangebyscore(offense_key, 0, now - self.ban_window)
+        pipe.expire(offense_key, self.ban_window + 60)
+        pipe.zcard(offense_key)
+        results = await pipe.execute()
         
-        if offense_count >= self.ban_after_offenses:
-            level = offense_count - self.ban_after_offenses + 1
-            ban_duration = min(self.initial_ban_sec * (2 ** (level - 1)), self.max_ban_sec)
+        offense_count = results[3]  # Get count from pipeline result
+        
+        if offense_count >= self.ban_after:
+            level = offense_count - self.ban_after + 1
+            ban_duration = min(self.initial_ban * (2 ** (level - 1)), self.max_ban)
             await self.redis.setex(f"ban:{hashed}", int(ban_duration), "1")
             return int(ban_duration)
-        
         return None
 
-    async def dispatch(self, request: Request, call_next) -> Response:
-        path = request.url.path.rstrip("/")
+    async def _error_response(self, scope: Scope, status: int, retry: int, msg: str, limit: int = 0, period: int = 0) -> Response:
+        headers = {"Retry-After": str(retry)}
         
-        if self._is_exempt(path):
-            return await call_next(request)
+        if status == 429:
+            headers.update({
+                "RateLimit-Policy": f"{limit};w={period}",
+                "RateLimit": f"limit={limit}, remaining=0, reset={retry}",
+            })
 
-        identifier = self._get_identifier(request)
+        accept = dict(scope.get("headers", [])).get(b"accept", b"").decode()
+        ua = dict(scope.get("headers", [])).get(b"user-agent", b"").decode().lower()
+        
+        if "application/json" in accept or any(x in ua for x in ["curl", "wget", "postman", "python-requests"]):
+            return JSONResponse(
+                {"error": "rate_limit_exceeded" if status == 429 else "forbidden", "detail": msg, "retry_after": retry},
+                status_code=status,
+                headers=headers
+            )
+        
+        html = ERROR_PAGES[status].format(retry=retry) if status == 429 else ERROR_PAGES[403]
+        return HTMLResponse(html, status_code=status, headers=headers)
 
-        # Check for active ban
+    async def _websocket_close(self, send: Send, code: int, reason: str) -> None:
+        """Send WebSocket close frame and disconnect."""
+        await send({
+            "type": "websocket.close",
+            "code": code,
+            "reason": reason[:123]  # Max 123 bytes for close reason
+        })
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
+        path = scope["path"].rstrip("/")
+        
+        # Fast path: exempt routes
+        if any(self._matches(path, prefix, wc) for prefix, wc in self.exempt):
+            await self.app(scope, receive, send)
+            return
+
+        identifier = self._get_identifier(scope)
+
+        # Check ban
         if self.enable_bans:
             ban_ttl = await self._check_ban(identifier)
             if ban_ttl:
-                return self._error_response(request, 403, ban_ttl, "Access blocked due to repeated abuse")
+                if scope["type"] == "websocket":
+                    await self._websocket_close(send, 1008, "Banned: Access blocked due to abuse")
+                    return
+                response = await self._error_response(scope, 403, ban_ttl, "Access blocked due to repeated abuse")
+                await response(scope, receive, send)
+                return
 
-        rules_to_apply = self._get_matching_rules(path)
+        # Get matching rules
+        rules_to_apply = [r for r in self.rules if self._matches(path, r["prefix"], r["wildcard"])]
+        
         if not rules_to_apply:
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
-        # Check all matching rules
-        allowed_rules = []
+        # Check all rules
+        best_remaining = float("inf")
+        best_headers = {}
+        
+        # Get Redis time once for all calculations
+        redis_time = await self.redis.time()
+        now = int(redis_time[0])
+        
         for rule in rules_to_apply:
             strategy = rule["strategy_cls"](self.redis)
-            allowed, reset_ts = await strategy.hit(identifier, rule["limit"], rule["period"])
+            allowed, remaining, reset_ts = await strategy.hit(identifier, rule["limit"], rule["period"])
             
             if not allowed:
-                reset_seconds = max(1, int(reset_ts - time.time()))
+                reset_seconds = max(1, int(reset_ts - now))
                 
-                # Record offense and check for ban
                 if self.enable_bans:
                     ban_duration = await self._record_offense(identifier)
                     if ban_duration:
-                        return self._error_response(
-                            request, 403, ban_duration, 
-                            f"Banned for {ban_duration // 60} minutes due to abuse"
-                        )
+                        if scope["type"] == "websocket":
+                            await self._websocket_close(send, 1008, f"Banned: {ban_duration // 60}m abuse")
+                            return
+                        response = await self._error_response(scope, 403, ban_duration, f"Banned for {ban_duration // 60} minutes")
+                        await response(scope, receive, send)
+                        return
                 
-                return self._error_response(
-                    request, 429, reset_seconds, "Rate limit exceeded",
-                    rule["limit"], rule["period"]
-                )
+                if scope["type"] == "websocket":
+                    await self._websocket_close(send, 1008, f"Rate limited: retry in {reset_seconds}s")
+                    return
+                    
+                response = await self._error_response(scope, 429, reset_seconds, "Rate limit exceeded", rule["limit"], rule["period"])
+                await response(scope, receive, send)
+                return
             
-            allowed_rules.append(rule)
+            if remaining < best_remaining:
+                best_remaining = remaining
+                reset_seconds = max(1, int(reset_ts - now))
+                best_headers = {
+                    "RateLimit-Policy": f"{rule['limit']};w={rule['period']}",
+                    "RateLimit": f"limit={rule['limit']}, remaining={remaining}, reset={reset_seconds}",
+                }
 
-        # Add rate limit headers from most restrictive rule
-        response = await call_next(request)
-        
-        if allowed_rules:
-            best_remaining = float("inf")
-            best_headers = {}
+        # WebSocket: pass through (headers added during handshake only)
+        if scope["type"] == "websocket":
+            # Add headers to handshake response
+            async def send_with_headers(message):
+                if message["type"] == "websocket.accept" and best_headers:
+                    headers = list(message.get("headers", []))
+                    for k, v in best_headers.items():
+                        headers.append((k.encode(), v.encode()))
+                    message["headers"] = headers
+                await send(message)
             
-            for rule in allowed_rules:
-                strategy = rule["strategy_cls"](self.redis)
-                _, remaining, reset_ts = await strategy.get_stats(identifier, rule["limit"], rule["period"])
-                
-                if remaining < best_remaining:
-                    best_remaining = remaining
-                    reset_seconds = max(1, int(reset_ts - time.time()))
-                    best_headers = {
-                        "RateLimit-Policy": f"{rule['limit']};w={rule['period']}",
-                        "RateLimit": f"limit={rule['limit']}, remaining={remaining}, reset={reset_seconds}",
-                    }
-            
-            for k, v in best_headers.items():
-                response.headers[k] = v
+            await self.app(scope, receive, send_with_headers)
+            return
 
-        return response
+        # HTTP: pass through and add headers
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                for k, v in best_headers.items():
+                    headers.append((k.encode(), v.encode()))
+                message["headers"] = headers
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)

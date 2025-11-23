@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fastapi-easylimiter"
-version = "0.4.0"
-description = "Async rate limiter for FastAPI with Redis or in-memory backend and advanced proxy-aware security"
+version = "0.4.2"
+description = "Async ASGI rate limiter for FastAPI with Redis."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
