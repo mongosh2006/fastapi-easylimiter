@@ -1,15 +1,12 @@
 # fastapi‑easylimiter
-
 [![GitHub stars](https://img.shields.io/github/stars/cfunkz/fastapi-easylimiter?style=social)](https://github.com/cfunkz/fastapi-easylimiter/stargazers) 
 [![GitHub forks](https://img.shields.io/github/forks/cfunkz/fastapi-easylimiter?style=social)](https://github.com/cfunkz/fastapi-easylimiter/network/members) 
 [![GitHub issues](https://img.shields.io/github/issues/cfunkz/fastapi-easylimiter)](https://github.com/cfunkz/fastapi-easylimiter/issues) 
 [![GitHub license](https://img.shields.io/github/license/cfunkz/fastapi-easylimiter)](https://github.com/cfunkz/fastapi-easylimiter/blob/main/LICENSE) 
 [![PyPI](https://img.shields.io/pypi/v/fastapi-easylimiter)](https://pypi.org/project/fastapi-easylimiter/)
-
 ---
 
 An **ASGI async rate-limiting middleware** for FastAPI with **Redis**, designed to handle **auto-generated routes** (e.g., FastAPI-Users) without decorators, for simplicity and ease of use.
-
 ---
 
 ## Features
@@ -17,29 +14,31 @@ An **ASGI async rate-limiting middleware** for FastAPI with **Redis**, designed 
 - Path based rules (`/api/*`, `/auth/*`, `/api/users/me`, etc)
 - Fixed, Sliding & Moving window algorithms (Lua)
 - `RateLimit`, `RateLimit-Policy`, `Retry-After` headers
-- Bans with back-off per IP with configurable window
 - ASGI async middleware for FastAPI/Starlette
 - Asyncio Redis support
 - Easy to configure
 - No decorators needed
 - HTML/JSON error responses
-- XFF Header Support when enabled
+- Site-wide or per-endpoint bans, with configurable durations
 ---
 
 ## TODO
 
 - In-memory option
+- Forwarded-For handling
+- Better websocket support
+---
 
 ## Rule Matching
 
 ### Single Rule
 Use these when you want a rule to apply to one specific endpoint only.
-```
+```python
 "/api/users/me": (20, 60, "sliding")
 ```
 
 This applies only to requests where the normalized path is exactly:
-```
+```python
 /api/users/me
 ```
 
@@ -48,12 +47,12 @@ Not `/api/users/me/profile`, not `/api/users/me/123`, not `/api/users`.
 
 ### Prefix Wildcards
 A rule ending with `/*` applies to all sub-paths under a given prefix, as one shared rate-limit bucket.
-```
+```python
 "/api/*": (100, 60, "sliding")
 ```
 
 This matches:
-```
+```python
 /api
 /api/
 /api/users
@@ -67,7 +66,7 @@ Rules are normalized and sorted so that:
 - Exact matches come before wildcard matches.
 - Longer prefixes take priority over shorter prefixes (so `/api/users/*` overrides `/api/*`)
 - A request may match multiple rules, if so, ALL matching rules run, and the strictest one determines whether the request is allowed.
-
+- Bans will double with each offense, up to the configured maximum ban length.
 ## Installation
 
 ```bash
@@ -100,8 +99,8 @@ app.add_middleware(
     ban_offenses=15,
     ban_length="3m",
     ban_max_length="30m",
-    enable_xff=False,
-    site_ban=True
+    ban_counter_ttl="1h",
+    site_ban=True,
     )
 ```
 
@@ -110,18 +109,16 @@ app.add_middleware(
 ---
 
 ### Redis Key Patterns
-
-| Key Pattern                               | Example                                   | Type        | Used For                                      |
-| ------------------------------------------| ----------------------------------------- | ----------- | --------------------------------------------- |
-| `rl:Fixe:{hash}:{limit}:{window}`         | `rl:Fixe:a1b2c3d4e5f6a7b8:100:60`         | String      | Fixed-window counter                          |
-| `rl:Slid:{hash}:{limit}:{window}`         | `rl:Slid:a1b2c3d4e5f6a7b8:60:60`          | ZSET        | Sliding window request log                    |
-| `offense:{hash}`                          | `offense:{a1b2c3d4e5f6a7b8}`              | ZSET        | Offense tracking for ban escalation           |
-| `ban:{hash}`                              | `ban:{a1b2c3d4e5f6a7b8}`                  | String+TTL  | Active ban flag                               |
-
+| Key Pattern                                   | Example                                 | Used For                                           |
+| --------------------------------------------- | --------------------------------------- | -------------------------------------------------- |
+| `rl:fixe:{hash}:{limit}:{window}`             | `rl:fixe:a1b2c3d4e5f6a7b8:100:60`       | Fixed-window counter                               |
+| `rl:slid:{hash}:{limit}:{window}`             | `rl:slid:a1b2c3d4e5f6a7b8:60:60`        | Sliding window request log                         |
+| `rl:movi:{hash}:{limit}:{window}:{window_id}` | `rl:movi:a1b2c3d4e5f6a7b8:100:60:12345` | Moving window per-subwindow counter                |
+| `{rl_key}:meta`                               | `rl:fixe:a1b2c3d4e5f6a7b8:100:60:meta`  | Stores both: `offenses` & `ban_count` for doubling |
+| `ban:{hash}`                                  | `ban:a1b2c3d4e5f6a7b8`                  | Active ban flag                                    |
 ---
 
 ### Middleware Parameters
-
 | Parameter        | Type                              | Required | Description                          |
 | ---------------- | --------------------------------- | -------- | ------------------------------------ |
 | `redis`          | `redis.asyncio.Redis`             | Yes      | Redis async client                   |
@@ -130,9 +127,8 @@ app.add_middleware(
 | `ban_offenses`   | `int`                             | No       | Offenses before ban triggers         |
 | `ban_length`     | `str`                             | No       | Initial ban length                   |
 | `ban_max_length` | `str`                             | No       | Maximum exponential ban ceiling      |
-| `enable_xff`     | `bool`                            | No       | Enable X-Forwarded-For support       |
+| `ban_counter_ttl`| `int`                             | No       | TTL for ban metadata (default 3600s) |
 | `site_ban`       | `bool`                            | No       | Enable site-wide bans or per-endpoint|
-
 ---
 
 ## Tests
