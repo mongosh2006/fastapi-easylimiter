@@ -98,10 +98,9 @@ class RateLimitMiddleware:
                 "strategy": strategy,
             })
         
-        # Sort: exact matches first (not wildcard), then by prefix length (longest first)
         return sorted(
-            normalized, 
-            key=lambda x: (x["wildcard"], -len(x["prefix"]))
+            normalized,
+            key=lambda x: (not x["wildcard"], len(x["prefix"]) if x["wildcard"] else -len(x["prefix"]))
         )
 
     def _matches(self, path: str, pattern: str, wildcard: bool) -> bool:

@@ -1,0 +1,12 @@
+fastapi>=0.110
+starlette>=0.36
+redis>=5.0.0
+
+[dev]
+pytest
+ruff
+black
+httpx
+
+[redis]
+redis>=5.0.0
